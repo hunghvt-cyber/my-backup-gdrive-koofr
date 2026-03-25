@@ -1,0 +1,22 @@
+name: Sync GDrive to Koofr
+
+on:
+  schedule:
+    - cron: '0 19 * * *' # Tự động chạy lúc 2h sáng mỗi ngày
+  workflow_dispatch:      # Cho phép bạn bấm nút chạy thử ngay bây giờ
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: Config Rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" > ~/.config/rclone/rclone.conf
+
+      - name: Sync Data
+        run: |
+          rclone sync gdrive:/ koofr:/GoogleBackup --progress
