@@ -15,7 +15,7 @@ jobs:
       - name: Config Rclone
         run: |
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
 
       - name: Sync Data
         run: |
