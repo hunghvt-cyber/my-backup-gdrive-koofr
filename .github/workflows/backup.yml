@@ -2,8 +2,8 @@ name: Sync GDrive to Koofr
 
 on:
   schedule:
-    - cron: '0 19 * * *' # Tự động chạy lúc 2h sáng mỗi ngày
-  workflow_dispatch:      # Cho phép bạn bấm nút chạy thử ngay bây giờ
+    - cron: '0 19 * * *'
+  workflow_dispatch:
 
 jobs:
   run-sync:
@@ -18,5 +18,19 @@ jobs:
           echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
 
       - name: Sync Data
+        id: sync_data
         run: |
-          rclone sync gdrive:/ koofr:/GoogleBackup --progress
+          # Chạy sync và lưu kết quả tóm tắt vào file log
+          rclone sync gdrive:/ koofr:/GoogleBackup --stats-one-line -v 2>&1 | tee rclone_log.txt
+
+      - name: Send Telegram Notification
+        if: always() # Luôn gửi tin nhắn dù thành công hay thất bại
+        run: |
+          STATUS="${{ job.status }}"
+          MSG="📊 *Báo cáo Backup:* %0A- Trạng thái: ${STATUS} %0A- Thời gian: $(date +'%d/%m/%Y %H:%M:%S')"
+          
+          # Gửi tin nhắn qua API Telegram
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=Markdown"
