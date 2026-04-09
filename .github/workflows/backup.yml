@@ -23,10 +23,3 @@ jobs:
           # Chạy sync và lưu kết quả tóm tắt vào file log
           rclone sync gdrive:/ koofr:/GoogleBackup --stats-one-line -v 2>&1 | tee rclone_log.txt
 
-      - name: Send Telegram Notification
-        if: always()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            --data-urlencode "chat_id=${{ secrets.TELEGRAM_TO }}" \
-            --data-urlencode "text=📊 Báo cáo Backup: ${{ job.status }} lúc $(date +'%H:%M:%S')"
-
