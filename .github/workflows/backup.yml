@@ -25,16 +25,15 @@ jobs:
 
       - name: Send Telegram Notification
         if: always()
-        env:
-          TELE_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELE_ID: ${{ secrets.TELEGRAM_TO }}
         run: |
           STATUS="${{ job.status }}"
           TIME=$(date +'%d/%m/%Y %H:%M:%S')
+          # Tạo nội dung tin nhắn
           MSG="📊 *Báo cáo Backup:* %0A- Trạng thái: ${STATUS} %0A- Thời gian: ${TIME}"
           
-          curl -s -X POST "https://api.telegram.org/bot${TELE_TOKEN}/sendMessage" \
-            -d "chat_id=${TELE_ID}" \
+          # Lệnh gửi tin nhắn (Sử dụng trực tiếp Secret để tránh lỗi biến môi trường)
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
             -d "text=${MSG}" \
             -d "parse_mode=Markdown"
 
