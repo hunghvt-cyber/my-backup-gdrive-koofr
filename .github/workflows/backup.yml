@@ -2,8 +2,13 @@ name: Sync GDrive and Koofr 2-Way
 
 on:
   schedule:
-    - cron: '0 19 * * *' # Chạy tự động lúc 2h sáng giờ VN
-  workflow_dispatch: # Cho phép bấm nút chạy thủ công
+    - cron: '0 19 * * *' # Chạy tự động mỗi ngày
+  workflow_dispatch: # Chạy thủ công bằng tay
+
+# Giải quyết vấn đề số 3: Không cho phép 2 workflow chạy đè lên nhau
+concurrency:
+  group: rclone-sync-group
+  cancel-in-progress: false # Giữ nguyên workflow cũ đang chạy cho xong, không hủy giữa chừng
 
 jobs:
   run-sync:
@@ -17,7 +22,12 @@ jobs:
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
 
-      # Bước này rất quan trọng: Giữ lại lịch sử bisync giữa các lần chạy GitHub Actions
+      # Giải quyết vấn đề số 1: Tạo sẵn thư mục cache để GitHub Action không bị lỗi "Path không tồn tại"
+      - name: Pre-create Cache Dirs
+        run: |
+          mkdir -p ~/.cache/rclone
+          mkdir -p ~/.config/rclone
+
       - name: Cache Rclone Bisync Data
         uses: actions/cache@v4
         with:
@@ -30,12 +40,12 @@ jobs:
 
       - name: Bi-directional Sync (2 chiều)
         run: |
-          # Kiểm tra xem đã từng chạy bisync trước đây chưa
-          # Nếu chưa từng chạy, cần thêm flag --resync để khởi tạo lần đầu
-          if [ -d "$HOME/.cache/rclone/bisync" ]; then
-            echo "Tìm thấy dữ liệu cũ, tiến hành đồng bộ 2 chiều..."
+          # Kiểm tra nếu thư mục chứa file lịch sử bisync có dữ liệu bên trong
+          if [ "$(ls -A $HOME/.cache/rclone/bisync 2>/dev/null)" ]; then
+            echo "🔥 Tìm thấy lịch sử đồng bộ trước đó. Tiến hành Bisync thông thường..."
             rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --conflict-resolve newer
           else
-            echo "Lần đầu tiên chạy, đang khởi tạo danh sách file (Resync)..."
-            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync
+            echo "⚠️ Không tìm thấy lịch sử (hoặc chạy lần đầu). Tiến hành Resync cấu hình ban đầu..."
+            # Giải quyết vấn đề số 2: Thêm --allow-non-empty để không bị lỗi nếu GDrive hoặc Koofr đã có sẵn file
+            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --allow-non-empty
           fi
