@@ -1,9 +1,9 @@
-name: Sync GDrive to Koofr
+name: Sync GDrive and Koofr 2-Way
 
 on:
   schedule:
-    - cron: '0 19 * * *'
-  workflow_dispatch:
+    - cron: '0 19 * * *' # Chạy tự động lúc 2h sáng giờ VN
+  workflow_dispatch: # Cho phép bấm nút chạy thủ công
 
 jobs:
   run-sync:
@@ -17,9 +17,25 @@ jobs:
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
 
-      - name: Sync Data
-        id: sync_data
-        run: |
-          # Chạy sync và lưu kết quả tóm tắt vào file log
-          rclone sync gdrive:/ koofr:/GoogleBackup --stats-one-line -v 2>&1 | tee rclone_log.txt
+      # Bước này rất quan trọng: Giữ lại lịch sử bisync giữa các lần chạy GitHub Actions
+      - name: Cache Rclone Bisync Data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rclone
+            ~/.config/rclone
+          key: rclone-bisync-${{ github.run_id }}
+          restore-keys: |
+            rclone-bisync-
 
+      - name: Bi-directional Sync (2 chiều)
+        run: |
+          # Kiểm tra xem đã từng chạy bisync trước đây chưa
+          # Nếu chưa từng chạy, cần thêm flag --resync để khởi tạo lần đầu
+          if [ -d "$HOME/.cache/rclone/bisync" ]; then
+            echo "Tìm thấy dữ liệu cũ, tiến hành đồng bộ 2 chiều..."
+            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --conflict-resolve newer
+          else
+            echo "Lần đầu tiên chạy, đang khởi tạo danh sách file (Resync)..."
+            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync
+          fi
