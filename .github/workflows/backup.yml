@@ -29,25 +29,43 @@ jobs:
           mkdir -p ~/.config/rclone
 
       # Lưu lại trạng thái lịch sử bisync giữa các lần chạy GitHub Actions
+      # LƯU Ý: key cố định (không dùng run_id) để cache thực sự được tái sử dụng giữa các lần chạy
       - name: Cache Rclone Bisync Data
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/rclone
             ~/.config/rclone
-          key: rclone-bisync-${{ github.run_id }}
+          key: rclone-bisync-state
           restore-keys: |
             rclone-bisync-
 
       # Tiến hành đồng bộ 2 chiều (Xóa bên này, bên kia xóa theo)
       - name: Bi-directional Sync (2 chiều)
         run: |
-          # Kiểm tra nếu thư mục chứa file lịch sử bisync đã có dữ liệu bên trong
+          # File/folder không có quyền copy (403 insufficientFilePermissions) - loại khỏi sync
+          EXCLUDES=(
+            --exclude "ThanhHung/Học tập/Học dựng video/200 Text Preset For Premiere Pro.zip"
+          )
+
+          # Giới hạn tốc độ gọi API để tránh lỗi "Quota exceeded ... Queries per minute"
+          RATE_LIMIT=(
+            --tpslimit 10
+            --tpslimit-burst 10
+            --drive-pacer-min-sleep 100ms
+          )
+
           if [ "$(ls -A $HOME/.cache/rclone/bisync 2>/dev/null)" ]; then
             echo "🔥 Tìm thấy lịch sử đồng bộ trước đó. Tiến hành Bisync thông thường..."
-            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --conflict-resolve newer
+            if ! rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --conflict-resolve newer \
+                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"; then
+              echo "⚠️ Bisync lỗi (có thể do critical error). Tự động chạy --resync để phục hồi..."
+              rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync \
+                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
+            fi
           else
             echo "⚠️ Không tìm thấy lịch sử (hoặc chạy lần đầu). Tiến hành Resync cấu hình ban đầu..."
             # Sử dụng cờ --force để ép Rclone gộp dữ liệu thành công ngay cả khi hai bên đã có sẵn file
-            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force
+            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
+              "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
           fi
