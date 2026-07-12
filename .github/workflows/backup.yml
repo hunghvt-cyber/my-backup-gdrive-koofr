@@ -1,14 +1,9 @@
-name: Sync GDrive and Koofr 2-Way
+name: Sync GDrive to Koofr
 
 on:
   schedule:
-    - cron: '0 19 * * *' # Tự động chạy mỗi ngày lúc 2h sáng giờ VN (19h UTC)
-  workflow_dispatch: # Cho phép bấm nút chạy thủ công bất kỳ lúc nào
-
-# Chống việc 2 lượt chạy đè lên nhau làm lỗi file lịch sử (Lock file)
-concurrency:
-  group: rclone-sync-group
-  cancel-in-progress: false # Giữ nguyên lượt đang chạy cho xong, không hủy giữa chừng
+    - cron: '0 19 * * *'
+  workflow_dispatch:
 
 jobs:
   run-sync:
@@ -22,59 +17,8 @@ jobs:
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
 
-      # Tạo sẵn thư mục cache để tránh lỗi không tìm thấy đường dẫn khi lưu cache lần đầu
-      - name: Pre-create Cache Dirs
+      - name: Sync Data
+        id: sync_data
         run: |
-          mkdir -p ~/.cache/rclone
-          mkdir -p ~/.config/rclone
-
-      # Lưu lại trạng thái lịch sử bisync giữa các lần chạy GitHub Actions
-      # LƯU Ý: key cố định (không dùng run_id) để cache thực sự được tái sử dụng giữa các lần chạy
-      - name: Cache Rclone Bisync Data
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/rclone
-            ~/.config/rclone
-          key: rclone-bisync-state
-          restore-keys: |
-            rclone-bisync-
-
-      # Tiến hành đồng bộ 2 chiều (Xóa bên này, bên kia xóa theo)
-      - name: Bi-directional Sync (2 chiều)
-        run: |
-          # File/folder không có quyền copy (403 insufficientFilePermissions) - loại khỏi sync
-          EXCLUDES=(
-            --exclude "ThanhHung/Học tập/Học dựng video/200 Text Preset For Premiere Pro.zip"
-          )
-
-          # Giới hạn tốc độ gọi API để tránh lỗi "Quota exceeded ... Queries per minute"
-          # + tự retry khi gặp lỗi mạng tạm thời (vd: "unexpected EOF" giữa lúc upload file lớn)
-          RATE_LIMIT=(
-            --tpslimit 10
-            --tpslimit-burst 10
-            --drive-pacer-min-sleep 100ms
-            --retries 5
-            --low-level-retries 10
-            --retries-sleep 10s
-          )
-
-          if [ "$(ls -A $HOME/.cache/rclone/bisync 2>/dev/null)" ]; then
-            echo "🔥 Tìm thấy lịch sử đồng bộ trước đó. Tiến hành Bisync thông thường..."
-            if ! rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --conflict-resolve newer \
-                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"; then
-              echo "⚠️ Bisync lỗi (có thể do critical error). Tự động chạy --resync để phục hồi..."
-              rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync \
-                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
-            fi
-          else
-            echo "⚠️ Không tìm thấy lịch sử (hoặc chạy lần đầu). Tiến hành Resync cấu hình ban đầu..."
-            # Sử dụng cờ --force để ép Rclone gộp dữ liệu thành công ngay cả khi hai bên đã có sẵn file
-            if ! rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
-                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"; then
-              echo "⚠️ Resync ban đầu lỗi (thường do lỗi mạng tạm thời). Thử lại 1 lần nữa..."
-              sleep 30
-              rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
-                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
-            fi
-          fi
+          # Chạy sync và lưu kết quả tóm tắt vào file log
+          rclone sync gdrive:/ koofr:/GoogleBackup --stats-one-line -v 2>&1 | tee rclone_log.txt
