@@ -49,10 +49,14 @@ jobs:
           )
 
           # Giới hạn tốc độ gọi API để tránh lỗi "Quota exceeded ... Queries per minute"
+          # + tự retry khi gặp lỗi mạng tạm thời (vd: "unexpected EOF" giữa lúc upload file lớn)
           RATE_LIMIT=(
             --tpslimit 10
             --tpslimit-burst 10
             --drive-pacer-min-sleep 100ms
+            --retries 5
+            --low-level-retries 10
+            --retries-sleep 10s
           )
 
           if [ "$(ls -A $HOME/.cache/rclone/bisync 2>/dev/null)" ]; then
@@ -66,6 +70,11 @@ jobs:
           else
             echo "⚠️ Không tìm thấy lịch sử (hoặc chạy lần đầu). Tiến hành Resync cấu hình ban đầu..."
             # Sử dụng cờ --force để ép Rclone gộp dữ liệu thành công ngay cả khi hai bên đã có sẵn file
-            rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
-              "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
+            if ! rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
+                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"; then
+              echo "⚠️ Resync ban đầu lỗi (thường do lỗi mạng tạm thời). Thử lại 1 lần nữa..."
+              sleep 30
+              rclone bisync gdrive:/ koofr:/GoogleBackup --verbose --resync --force \
+                "${EXCLUDES[@]}" "${RATE_LIMIT[@]}"
+            fi
           fi
