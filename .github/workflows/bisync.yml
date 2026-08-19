@@ -36,22 +36,22 @@ jobs:
 
       - name: Execute Bisync (2-Way Sync)
         run: |
-          # Kiểm tra nếu chưa từng có cache (lần chạy đầu tiên) hoặc người dùng tích chọn resync
+          # Thêm cờ bỏ qua cảnh báo file độc hại của Google Drive
+          EXTRA_FLAGS="--fast-list --drive-acknowledge-abuse --verbose"
+
           if [ ! -d ~/.cache/rclone/bisync ] || [ "${{ inputs.resync }}" = "true" ]; then
             echo "[INFO] Running initial bisync with --resync..."
             rclone bisync gdrive:/ koofr:/GoogleBackup \
               --resync \
-              --fast-list \
-              --verbose
+              $EXTRA_FLAGS
           else
             echo "[INFO] Running normal 2-way bisync..."
             rclone bisync gdrive:/ koofr:/GoogleBackup \
-              --fast-list \
               --max-delete 15% \
-              --verbose
+              $EXTRA_FLAGS
           fi
 
-      # Lưu lại file lịch sử bisync mới nhất cho lượt chạy hôm sau
+      # Lưu lại file lịch sử bisync cho lượt chạy hôm sau
       - name: Save Bisync Path History Cache
         if: always()
         uses: actions/cache/save@v4
