@@ -1,0 +1,60 @@
+name: Two-Way Sync (GDrive <-> Koofr)
+
+on:
+  schedule:
+    # Chạy tự động lúc 02:00 sáng giờ VN hàng ngày (19:00 UTC)
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      resync:
+        description: 'Tích chọn nếu chạy lần đầu hoặc muốn thiết lập lại mốc (Resync)'
+        type: boolean
+        default: false
+
+jobs:
+  run-bisync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Rclone
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y rclone
+
+      - name: Config Rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
+
+      # Kéo lại file lịch sử bisync đã lưu ở lượt chạy trước
+      - name: Restore Bisync Path History Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/rclone/bisync
+          key: rclone-bisync-history-${{ github.run_id }}
+          restore-keys: |
+            rclone-bisync-history-
+
+      - name: Execute Bisync (2-Way Sync)
+        run: |
+          # Kiểm tra nếu chưa từng có cache (lần chạy đầu tiên) hoặc người dùng tích chọn resync
+          if [ ! -d ~/.cache/rclone/bisync ] || [ "${{ inputs.resync }}" = "true" ]; then
+            echo "[INFO] Running initial bisync with --resync..."
+            rclone bisync gdrive:/ koofr:/GoogleBackup \
+              --resync \
+              --fast-list \
+              --verbose
+          else
+            echo "[INFO] Running normal 2-way bisync..."
+            rclone bisync gdrive:/ koofr:/GoogleBackup \
+              --fast-list \
+              --max-delete 15% \
+              --verbose
+          fi
+
+      # Lưu lại file lịch sử bisync mới nhất cho lượt chạy hôm sau
+      - name: Save Bisync Path History Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/rclone/bisync
+          key: rclone-bisync-history-${{ github.run_id }}
