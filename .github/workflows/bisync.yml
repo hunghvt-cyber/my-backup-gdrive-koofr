@@ -1,60 +1,190 @@
-name: Two-Way Sync (GDrive <-> Koofr)
+name: Two-Way Sync (Google Drive <-> Koofr)
 
 on:
   schedule:
-    # Chạy tự động lúc 02:00 sáng giờ VN hàng ngày (19:00 UTC)
+    # 02:00 sáng giờ Việt Nam = 19:00 UTC
     - cron: '0 19 * * *'
+
   workflow_dispatch:
     inputs:
       resync:
-        description: 'Tích chọn nếu chạy lần đầu hoặc muốn thiết lập lại mốc (Resync)'
+        description: 'Resync lại bisync state. Chỉ dùng lần đầu hoặc khi cần khôi phục.'
+        required: false
         type: boolean
         default: false
+
+# Không cho phép 2 lần bisync chạy cùng lúc.
+concurrency:
+  group: gdrive-koofr-bisync
+  cancel-in-progress: false
 
 jobs:
   run-bisync:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
+      # ------------------------------------------------------------
+      # 1. Install latest rclone
+      # ------------------------------------------------------------
       - name: Install Rclone
+        shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y rclone
+          set -euo pipefail
 
-      - name: Config Rclone
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+          echo "Rclone version:"
+          rclone version
+
+      # ------------------------------------------------------------
+      # 2. Configure rclone
+      # ------------------------------------------------------------
+      - name: Configure Rclone
+        shell: bash
+        env:
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG_CONTENT }}
         run: |
-          mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG_CONTENT }}" | base64 -d > ~/.config/rclone/rclone.conf
+          set -euo pipefail
 
-      # Kéo lại file lịch sử bisync đã lưu ở lượt chạy trước
-      - name: Restore Bisync Path History Cache
+          mkdir -p "$HOME/.config/rclone"
+
+          printf '%s' "$RCLONE_CONFIG_CONTENT" \
+            | base64 --decode \
+            > "$HOME/.config/rclone/rclone.conf"
+
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+
+          echo "Checking rclone remotes..."
+
+          rclone listremotes
+
+          echo "Testing Google Drive remote..."
+          rclone lsd gdrive: --max-depth 1
+
+          echo "Testing Koofr remote..."
+          rclone lsd koofr:GoogleBackup --max-depth 1
+
+      # ------------------------------------------------------------
+      # 3. Restore bisync state
+      # ------------------------------------------------------------
+      - name: Restore Bisync State
+        id: restore_state
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/rclone/bisync
-          key: rclone-bisync-history-${{ github.run_id }}
+          key: rclone-bisync-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            rclone-bisync-history-
+            rclone-bisync-state-${{ github.ref_name }}-
+            rclone-bisync-state-
 
-      - name: Execute Bisync (2-Way Sync)
+      # ------------------------------------------------------------
+      # 4. Check whether bisync has usable state
+      # ------------------------------------------------------------
+      - name: Check Bisync State
+        id: state
+        shell: bash
         run: |
-          # Thêm cờ bỏ qua cảnh báo file độc hại của Google Drive
-          EXTRA_FLAGS="--fast-list --drive-acknowledge-abuse --verbose"
+          set -euo pipefail
 
-          if [ ! -d ~/.cache/rclone/bisync ] || [ "${{ inputs.resync }}" = "true" ]; then
-            echo "[INFO] Running initial bisync with --resync..."
-            rclone bisync gdrive:/ koofr:/GoogleBackup \
-              --resync \
-              $EXTRA_FLAGS
+          STATE_DIR="$HOME/.cache/rclone/bisync"
+
+          echo "Bisync state directory:"
+          echo "$STATE_DIR"
+
+          if [ -d "$STATE_DIR" ] && find "$STATE_DIR" -type f | grep -q .; then
+            echo "state_exists=true" >> "$GITHUB_OUTPUT"
+            echo "[INFO] Existing bisync state found."
+            find "$STATE_DIR" -maxdepth 2 -type f -print
           else
-            echo "[INFO] Running normal 2-way bisync..."
-            rclone bisync gdrive:/ koofr:/GoogleBackup \
-              --max-delete 15% \
-              $EXTRA_FLAGS
+            echo "state_exists=false" >> "$GITHUB_OUTPUT"
+            echo "[INFO] No usable bisync state found."
           fi
 
-      # Lưu lại file lịch sử bisync cho lượt chạy hôm sau
-      - name: Save Bisync Path History Cache
+      # ------------------------------------------------------------
+      # 5. Initial / manual resync
+      # ------------------------------------------------------------
+      - name: Initial / Manual Resync
+        if: steps.state.outputs.state_exists != 'true' || inputs.resync == true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "RCLONE BISYNC RESYNC"
+          echo "============================================================"
+          echo ""
+          echo "Google Drive : gdrive:/"
+          echo "Koofr        : koofr:/GoogleBackup"
+          echo ""
+          echo "This is a RESYNC operation."
+          echo ""
+
+          rclone bisync \
+            gdrive:/ \
+            koofr:/GoogleBackup \
+            --resync \
+            --fast-list \
+            --track-renames \
+            --track-renames-strategy modtime,leaf \
+            --max-delete 15% \
+            --recover \
+            --resilient \
+            --stats 30s \
+            --stats-one-line \
+            --log-level INFO
+
+      # ------------------------------------------------------------
+      # 6. Normal two-way sync
+      # ------------------------------------------------------------
+      - name: Normal Two-Way Sync
+        if: steps.state.outputs.state_exists == 'true' && inputs.resync != true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "============================================================"
+          echo "RCLONE BISYNC - NORMAL RUN"
+          echo "============================================================"
+          echo ""
+          echo "Google Drive : gdrive:/"
+          echo "Koofr        : koofr:/GoogleBackup"
+          echo ""
+
+          rclone bisync \
+            gdrive:/ \
+            koofr:/GoogleBackup \
+            --fast-list \
+            --track-renames \
+            --track-renames-strategy modtime,leaf \
+            --max-delete 15% \
+            --recover \
+            --resilient \
+            --stats 30s \
+            --stats-one-line \
+            --log-level INFO
+
+      # ------------------------------------------------------------
+      # 7. Save bisync state
+      # ------------------------------------------------------------
+      - name: Save Bisync State
         if: always()
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/rclone/bisync
-          key: rclone-bisync-history-${{ github.run_id }}
+          key: rclone-bisync-state-${{ github.ref_name }}-${{ github.run_id }}
+
+      # ------------------------------------------------------------
+      # 8. Final status
+      # ------------------------------------------------------------
+      - name: Sync Summary
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "SYNC JOB FINISHED"
+          echo "============================================================"
+          echo "Google Drive <-> Koofr"
+          echo "Target: koofr:/GoogleBackup"
+          echo "============================================================"
