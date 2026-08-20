@@ -8,15 +8,17 @@ on:
   workflow_dispatch:
     inputs:
       resync:
-        description: 'Force resync baseline. CHỈ bật khi lần đầu hoặc rclone yêu cầu resync.'
+        description: 'Tạo lại bisync baseline. Chỉ bật khi lần đầu hoặc bisync yêu cầu.'
         required: false
         type: boolean
         default: false
 
-# Không cho phép 2 lần bisync chạy đồng thời.
 concurrency:
   group: gdrive-koofr-bisync
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   run-bisync:
@@ -26,7 +28,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Install latest rclone
+      # 1. Install rclone
       # ============================================================
       - name: Install Rclone
         shell: bash
@@ -70,7 +72,7 @@ jobs:
 
 
       # ============================================================
-      # 3. Restore previous bisync state
+      # 3. Restore bisync state
       # ============================================================
       - name: Restore Bisync State
         id: restore_state
@@ -84,60 +86,115 @@ jobs:
 
 
       # ============================================================
-      # 4. Check bisync state
+      # 4. Restore ignored-file list
       # ============================================================
-      - name: Check Bisync State
-        id: state
+      - name: Restore Ignored Files
+        uses: actions/cache/restore@v4
+        with:
+          path: .sync-state/ignored-files.txt
+          key: rclone-ignored-files-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            rclone-ignored-files-${{ github.ref_name }}-
+            rclone-ignored-files-
+
+
+      # ============================================================
+      # 5. Prepare state
+      # ============================================================
+      - name: Prepare Sync State
+        id: prepare
         shell: bash
         run: |
           set -euo pipefail
 
-          STATE_DIR="$HOME/.cache/rclone/bisync"
+          mkdir -p .sync-state
 
-          echo "Checking bisync state..."
-          echo "Directory: $STATE_DIR"
+          if [ ! -f .sync-state/ignored-files.txt ]; then
+            touch .sync-state/ignored-files.txt
+          fi
+
+          sort -u .sync-state/ignored-files.txt \
+            -o .sync-state/ignored-files.txt
+
+          echo "Current ignored files:"
+          if [ -s .sync-state/ignored-files.txt ]; then
+            cat .sync-state/ignored-files.txt
+          else
+            echo "(none)"
+          fi
+
+          STATE_DIR="$HOME/.cache/rclone/bisync"
 
           if [ -d "$STATE_DIR" ] && \
              find "$STATE_DIR" -type f -print -quit | grep -q .; then
-
             echo "state_exists=true" >> "$GITHUB_OUTPUT"
-
             echo ""
-            echo "[INFO] Existing bisync state found:"
-            find "$STATE_DIR" -type f -maxdepth 2 -print
-
+            echo "[INFO] Bisync state exists."
           else
-
             echo "state_exists=false" >> "$GITHUB_OUTPUT"
-
             echo ""
-            echo "[INFO] No usable bisync state found."
-
+            echo "[INFO] Bisync state does not exist."
           fi
 
 
       # ============================================================
-      # 5. Manual / Initial RESYNC
+      # 6. Build rclone filter file
       #
-      # Không tự động resync khi cache mất.
-      # Đây là chủ ý để tránh một cache GitHub bị mất làm workflow
-      # tự ý thiết lập lại baseline.
+      # Each ignored path becomes:
+      #
+      #   - exact/path
+      #
+      # This excludes that object from both sides of bisync.
       # ============================================================
-      - name: Resync
-        if: inputs.resync == true
+      - name: Build Ignore Filter
         shell: bash
         run: |
           set -euo pipefail
+
+          FILTER_FILE="$HOME/.cache/rclone/bisync-ignore-filter.txt"
+
+          mkdir -p "$(dirname "$FILTER_FILE")"
+
+          : > "$FILTER_FILE"
+
+          while IFS= read -r path || [ -n "$path" ]; do
+            [ -z "$path" ] && continue
+            printf '%s\n' "- $path" >> "$FILTER_FILE"
+          done < .sync-state/ignored-files.txt
+
+          echo "Generated filter:"
+          cat "$FILTER_FILE"
+
+
+      # ============================================================
+      # 7. RESYNC
+      #
+      # Used when:
+      # - user explicitly requests resync
+      # - no bisync state exists
+      #
+      # The command is allowed to fail temporarily because we may
+      # discover problematic files and retry with them excluded.
+      # ============================================================
+      - name: Initial / Manual Resync
+        id: resync
+        if: inputs.resync == true || steps.prepare.outputs.state_exists != 'true'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
 
           echo ""
           echo "============================================================"
           echo "RCLONE BISYNC RESYNC"
           echo "============================================================"
-          echo "Path 1 : gdrive:/"
-          echo "Path 2 : koofr:/GoogleBackup"
-          echo "Max delete : 100 objects"
+          echo "Google Drive : gdrive:/"
+          echo "Koofr        : koofr:/GoogleBackup"
+          echo "Max delete   : 100"
           echo "============================================================"
           echo ""
+
+          LOG_FILE="$GITHUB_WORKSPACE/bisync.log"
 
           rclone bisync \
             gdrive:/ \
@@ -145,37 +202,192 @@ jobs:
             --resync \
             --fast-list \
             --drive-acknowledge-abuse \
-            --track-renames \
             --max-delete 100 \
             --recover \
             --resilient \
+            --filter-from "$HOME/.cache/rclone/bisync-ignore-filter.txt" \
             --stats 30s \
             --stats-one-line \
-            --log-level INFO
+            --log-level INFO \
+            2>&1 | tee "$LOG_FILE"
+
+          RC=${PIPESTATUS[0]}
+
+          echo "rclone_exit_code=$RC" >> "$GITHUB_OUTPUT"
+
+          exit "$RC"
 
 
       # ============================================================
-      # 6. Normal two-way sync
-      #
-      # Chỉ chạy khi:
-      # - Có bisync state
-      # - Không yêu cầu resync thủ công
+      # 8. Extract ignorable errors
       # ============================================================
-      - name: Normal Two-Way Sync
-        if: inputs.resync != true && steps.state.outputs.state_exists == 'true'
+      - name: Extract Ignored Files
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
+
+          LOG_FILE="$GITHUB_WORKSPACE/bisync.log"
+          IGNORE_FILE=".sync-state/ignored-files.txt"
+
+          touch "$IGNORE_FILE"
+
+          if [ ! -f "$LOG_FILE" ]; then
+            echo "[INFO] No bisync log found."
+            exit 0
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo "SCANNING FOR IGNORABLE FILES"
+          echo "============================================================"
+
+          # --------------------------------------------------------
+          # Google Drive insufficientFilePermissions
+          #
+          # Format:
+          # ERROR : path: Failed to copy: googleapi: Error 403:
+          # ...
+          # insufficientFilePermissions
+          # --------------------------------------------------------
+
+          grep 'insufficientFilePermissions' "$LOG_FILE" \
+            | sed -E 's/^[^:]* ERROR : (.*): Failed to copy:.*$/\1/' \
+            >> "$IGNORE_FILE" || true
+
+
+          # --------------------------------------------------------
+          # FileBlocked
+          #
+          # Format:
+          # ERROR : path: Failed to copy:
+          # ...
+          # "code":"FileBlocked"
+          # --------------------------------------------------------
+
+          grep 'FileBlocked' "$LOG_FILE" \
+            | sed -E 's/^[^:]* ERROR : (.*): Failed to copy:.*$/\1/' \
+            >> "$IGNORE_FILE" || true
+
+
+          # --------------------------------------------------------
+          # Clean list
+          # --------------------------------------------------------
+
+          sed -i '/^[[:space:]]*$/d' "$IGNORE_FILE"
+
+          sort -u "$IGNORE_FILE" -o "$IGNORE_FILE"
+
+          echo ""
+          echo "Ignored files:"
+          cat "$IGNORE_FILE" || true
+
+          echo ""
+          echo "Ignored file count:"
+          wc -l < "$IGNORE_FILE"
+
+
+      # ============================================================
+      # 9. Rebuild filter after discovering new errors
+      # ============================================================
+      - name: Rebuild Ignore Filter
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILTER_FILE="$HOME/.cache/rclone/bisync-ignore-filter.txt"
+
+          : > "$FILTER_FILE"
+
+          if [ -f .sync-state/ignored-files.txt ]; then
+            while IFS= read -r path || [ -n "$path" ]; do
+              [ -z "$path" ] && continue
+              printf '%s\n' "- $path" >> "$FILTER_FILE"
+            done < .sync-state/ignored-files.txt
+          fi
+
+          echo "Updated filter:"
+          cat "$FILTER_FILE" || true
+
+
+      # ============================================================
+      # 10. Retry RESYNC after ignoring problematic files
+      #
+      # Only runs when the first resync failed and we discovered
+      # at least one ignorable file.
+      # ============================================================
+      - name: Retry Resync With Ignored Files
+        id: retry_resync
+        if: |
+          (inputs.resync == true || steps.prepare.outputs.state_exists != 'true')
+          && steps.resync.outcome == 'failure'
+          && hashFiles('.sync-state/ignored-files.txt') != ''
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+
+          echo ""
+          echo "============================================================"
+          echo "RETRY RESYNC WITH IGNORED FILES"
+          echo "============================================================"
+
+          echo "Ignored files:"
+          cat .sync-state/ignored-files.txt
+
+          echo ""
+
+          # A failed resync must not reuse a partially created
+          # bisync state.
+          rm -rf "$HOME/.cache/rclone/bisync"
+
+          LOG_FILE="$GITHUB_WORKSPACE/bisync-retry.log"
+
+          rclone bisync \
+            gdrive:/ \
+            koofr:/GoogleBackup \
+            --resync \
+            --fast-list \
+            --drive-acknowledge-abuse \
+            --max-delete 100 \
+            --recover \
+            --resilient \
+            --filter-from "$HOME/.cache/rclone/bisync-ignore-filter.txt" \
+            --stats 30s \
+            --stats-one-line \
+            --log-level INFO \
+            2>&1 | tee "$LOG_FILE"
+
+          RC=${PIPESTATUS[0]}
+
+          echo "rclone_exit_code=$RC" >> "$GITHUB_OUTPUT"
+
+          exit "$RC"
+
+
+      # ============================================================
+      # 11. Normal bisync
+      #
+      # Only runs when a valid state existed and resync wasn't
+      # requested.
+      # ============================================================
+      - name: Normal Two-Way Sync
+        id: normal_sync
+        if: |
+          inputs.resync != true
+          && steps.prepare.outputs.state_exists == 'true'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
 
           echo ""
           echo "============================================================"
           echo "RCLONE BISYNC - NORMAL RUN"
           echo "============================================================"
-          echo "Path 1 : gdrive:/"
-          echo "Path 2 : koofr:/GoogleBackup"
-          echo "Max delete : 100 objects"
-          echo "============================================================"
-          echo ""
+
+          LOG_FILE="$GITHUB_WORKSPACE/bisync.log"
 
           rclone bisync \
             gdrive:/ \
@@ -186,41 +398,106 @@ jobs:
             --max-delete 100 \
             --recover \
             --resilient \
+            --filter-from "$HOME/.cache/rclone/bisync-ignore-filter.txt" \
             --stats 30s \
             --stats-one-line \
-            --log-level INFO
+            --log-level INFO \
+            2>&1 | tee "$LOG_FILE"
+
+          RC=${PIPESTATUS[0]}
+
+          echo "rclone_exit_code=$RC" >> "$GITHUB_OUTPUT"
+
+          exit "$RC"
 
 
       # ============================================================
-      # 7. Stop safely if state is missing
+      # 12. Detect whether normal sync failed because of a NEW
+      #     ignorable file.
       #
-      # Không tự ý resync.
+      # If so, retry once with the newly discovered exclusions.
       # ============================================================
-      - name: Stop - Bisync State Missing
-        if: inputs.resync != true && steps.state.outputs.state_exists != 'true'
+      - name: Retry Normal Sync With New Ignored Files
+        id: retry_normal
+        if: |
+          inputs.resync != true
+          && steps.prepare.outputs.state_exists == 'true'
+          && steps.normal_sync.outcome == 'failure'
         shell: bash
+        continue-on-error: true
         run: |
+          set +e
+
+          LOG_FILE="$GITHUB_WORKSPACE/bisync.log"
+
+          if [ ! -f "$LOG_FILE" ]; then
+            echo "[INFO] No log found."
+            exit 1
+          fi
+
+          BEFORE=$(git hash-object .sync-state/ignored-files.txt 2>/dev/null || true)
+
+          grep 'insufficientFilePermissions' "$LOG_FILE" \
+            | sed -E 's/^[^:]* ERROR : (.*): Failed to copy:.*$/\1/' \
+            >> .sync-state/ignored-files.txt || true
+
+          grep 'FileBlocked' "$LOG_FILE" \
+            | sed -E 's/^[^:]* ERROR : (.*): Failed to copy:.*$/\1/' \
+            >> .sync-state/ignored-files.txt || true
+
+          sed -i '/^[[:space:]]*$/d' .sync-state/ignored-files.txt
+          sort -u .sync-state/ignored-files.txt \
+            -o .sync-state/ignored-files.txt
+
+          AFTER=$(git hash-object .sync-state/ignored-files.txt 2>/dev/null || true)
+
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "[INFO] No new ignorable files detected."
+            exit 1
+          fi
+
           echo ""
-          echo "============================================================"
-          echo "ERROR: BISYNC STATE NOT FOUND"
-          echo "============================================================"
+          echo "New ignored files detected:"
+          cat .sync-state/ignored-files.txt
+
+          FILTER_FILE="$HOME/.cache/rclone/bisync-ignore-filter.txt"
+
+          : > "$FILTER_FILE"
+
+          while IFS= read -r path || [ -n "$path" ]; do
+            [ -z "$path" ] && continue
+            printf '%s\n' "- $path" >> "$FILTER_FILE"
+          done < .sync-state/ignored-files.txt
+
           echo ""
-          echo "Không tìm thấy bisync state."
-          echo ""
-          echo "Không tự động chạy --resync để tránh thay đổi dữ liệu"
-          echo "ngoài ý muốn."
-          echo ""
-          echo "Nếu đây là lần đầu hoặc cần tạo lại baseline:"
-          echo "GitHub Actions -> Run workflow -> resync = true"
-          echo ""
-          exit 1
+          echo "Retrying normal bisync..."
+
+          LOG_RETRY="$GITHUB_WORKSPACE/bisync-retry.log"
+
+          rclone bisync \
+            gdrive:/ \
+            koofr:/GoogleBackup \
+            --fast-list \
+            --drive-acknowledge-abuse \
+            --track-renames \
+            --max-delete 100 \
+            --recover \
+            --resilient \
+            --filter-from "$FILTER_FILE" \
+            --stats 30s \
+            --stats-one-line \
+            --log-level INFO \
+            2>&1 | tee "$LOG_RETRY"
+
+          RC=${PIPESTATUS[0]}
+
+          echo "rclone_exit_code=$RC" >> "$GITHUB_OUTPUT"
+
+          exit "$RC"
 
 
       # ============================================================
-      # 8. Save bisync state
-      #
-      # Cache key dùng run_id để tránh conflict với cache cũ.
-      # Restore-keys ở bước 3 sẽ lấy state mới nhất.
+      # 13. Save bisync state
       # ============================================================
       - name: Save Bisync State
         if: always() && hashFiles('/home/runner/.cache/rclone/bisync/**') != ''
@@ -231,16 +508,120 @@ jobs:
 
 
       # ============================================================
-      # 9. Summary
+      # 14. Save ignored-file list
       # ============================================================
-      - name: Sync Summary
+      - name: Save Ignored Files State
+        if: always() && hashFiles('.sync-state/ignored-files.txt') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .sync-state/ignored-files.txt
+          key: rclone-ignored-files-${{ github.ref_name }}-${{ github.run_id }}
+
+
+      # ============================================================
+      # 15. Upload ignored-file report
+      # ============================================================
+      - name: Upload Ignored Files Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bisync-ignored-files-${{ github.run_id }}
+          path: |
+            .sync-state/ignored-files.txt
+            bisync.log
+            bisync-retry.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+
+      # ============================================================
+      # 16. GitHub Actions Summary
+      # ============================================================
+      - name: Generate Summary
         if: always()
         shell: bash
         run: |
+          {
+            echo "## Google Drive ↔ Koofr"
+            echo ""
+            echo "**Target:** \`koofr:/GoogleBackup\`"
+            echo ""
+            echo "### Ignored files"
+            echo ""
+
+            if [ -s .sync-state/ignored-files.txt ]; then
+              COUNT=$(wc -l < .sync-state/ignored-files.txt)
+              echo "**$COUNT file(s)** currently ignored."
+              echo ""
+              echo '```text'
+              cat .sync-state/ignored-files.txt
+              echo '```'
+            else
+              echo "No ignored files."
+            fi
+
+            echo ""
+            echo "### Safety"
+            echo ""
+            echo "- Two-way bisync"
+            echo "- Maximum deletion: 100 objects"
+            echo "- No automatic resync when state is missing"
+            echo "- 403 permission / FileBlocked errors are tracked and ignored"
+            echo "- Other errors remain fatal"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+      # ============================================================
+      # 17. Final failure decision
+      #
+      # Ignorable 403/FileBlocked errors do NOT fail the workflow
+      # after a successful retry.
+      #
+      # Any other rclone failure DOES fail the workflow.
+      # ============================================================
+      - name: Final Status
+        shell: bash
+        run: |
+          set -euo pipefail
+
           echo ""
           echo "============================================================"
-          echo "SYNC JOB FINISHED"
+          echo "FINAL STATUS"
           echo "============================================================"
-          echo "Google Drive <-> Koofr"
-          echo "Koofr target: koofr:/GoogleBackup"
-          echo "============================================================"
+
+          # --------------------------------------------------------
+          # Resync mode
+          # --------------------------------------------------------
+          if [ "${{ inputs.resync }}" = "true" ] || \
+             [ "${{ steps.prepare.outputs.state_exists }}" != "true" ]; then
+
+            if [ "${{ steps.retry_resync.outcome }}" = "success" ]; then
+              echo "RESYNC SUCCESS"
+              exit 0
+            fi
+
+            if [ "${{ steps.resync.outcome }}" = "success" ]; then
+              echo "RESYNC SUCCESS"
+              exit 0
+            fi
+
+            echo "RESYNC FAILED"
+            exit 1
+          fi
+
+
+          # --------------------------------------------------------
+          # Normal mode
+          # --------------------------------------------------------
+          if [ "${{ steps.retry_normal.outcome }}" = "success" ]; then
+            echo "NORMAL BISYNC SUCCESS"
+            exit 0
+          fi
+
+          if [ "${{ steps.normal_sync.outcome }}" = "success" ]; then
+            echo "NORMAL BISYNC SUCCESS"
+            exit 0
+          fi
+
+          echo "NORMAL BISYNC FAILED"
+          exit 1
