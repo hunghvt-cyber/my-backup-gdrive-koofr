@@ -2,18 +2,18 @@ name: Two-Way Sync (Google Drive <-> Koofr)
 
 on:
   schedule:
-    # 02:00 sáng giờ Việt Nam = 19:00 UTC
+    # 02:00 giờ Việt Nam = 19:00 UTC
     - cron: '0 19 * * *'
 
   workflow_dispatch:
     inputs:
       resync:
-        description: 'Resync lại bisync state. Chỉ dùng lần đầu hoặc khi cần khôi phục.'
+        description: 'Force resync baseline. CHỈ bật khi lần đầu hoặc rclone yêu cầu resync.'
         required: false
         type: boolean
         default: false
 
-# Không cho phép hai bisync chạy cùng lúc.
+# Không cho phép 2 lần bisync chạy đồng thời.
 concurrency:
   group: gdrive-koofr-bisync
   cancel-in-progress: false
@@ -21,13 +21,13 @@ concurrency:
 jobs:
   run-bisync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
 
-      # ------------------------------------------------------------
-      # 1. Install rclone
-      # ------------------------------------------------------------
+      # ============================================================
+      # 1. Install latest rclone
+      # ============================================================
       - name: Install Rclone
         shell: bash
         run: |
@@ -39,9 +39,9 @@ jobs:
           rclone version
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # 2. Configure rclone
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Configure Rclone
         shell: bash
         env:
@@ -69,9 +69,9 @@ jobs:
           rclone lsd koofr:GoogleBackup --max-depth 1
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # 3. Restore previous bisync state
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Restore Bisync State
         id: restore_state
         uses: actions/cache/restore@v4
@@ -83,9 +83,9 @@ jobs:
             rclone-bisync-state-
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # 4. Check bisync state
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Check Bisync State
         id: state
         shell: bash
@@ -97,7 +97,9 @@ jobs:
           echo "Checking bisync state..."
           echo "Directory: $STATE_DIR"
 
-          if [ -d "$STATE_DIR" ] && find "$STATE_DIR" -type f -print -quit | grep -q .; then
+          if [ -d "$STATE_DIR" ] && \
+             find "$STATE_DIR" -type f -print -quit | grep -q .; then
+
             echo "state_exists=true" >> "$GITHUB_OUTPUT"
 
             echo ""
@@ -105,18 +107,24 @@ jobs:
             find "$STATE_DIR" -type f -maxdepth 2 -print
 
           else
+
             echo "state_exists=false" >> "$GITHUB_OUTPUT"
 
             echo ""
             echo "[INFO] No usable bisync state found."
+
           fi
 
 
-      # ------------------------------------------------------------
-      # 5. Initial / manual resync
-      # ------------------------------------------------------------
-      - name: Initial / Manual Resync
-        if: steps.state.outputs.state_exists != 'true' || inputs.resync == true
+      # ============================================================
+      # 5. Manual / Initial RESYNC
+      #
+      # Không tự động resync khi cache mất.
+      # Đây là chủ ý để tránh một cache GitHub bị mất làm workflow
+      # tự ý thiết lập lại baseline.
+      # ============================================================
+      - name: Resync
+        if: inputs.resync == true
         shell: bash
         run: |
           set -euo pipefail
@@ -125,9 +133,9 @@ jobs:
           echo "============================================================"
           echo "RCLONE BISYNC RESYNC"
           echo "============================================================"
-          echo "Google Drive : gdrive:/"
-          echo "Koofr        : koofr:/GoogleBackup"
-          echo "Max delete   : 100 objects"
+          echo "Path 1 : gdrive:/"
+          echo "Path 2 : koofr:/GoogleBackup"
+          echo "Max delete : 100 objects"
           echo "============================================================"
           echo ""
 
@@ -136,8 +144,8 @@ jobs:
             koofr:/GoogleBackup \
             --resync \
             --fast-list \
+            --drive-acknowledge-abuse \
             --track-renames \
-            --track-renames-strategy modtime,leaf \
             --max-delete 100 \
             --recover \
             --resilient \
@@ -146,11 +154,15 @@ jobs:
             --log-level INFO
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # 6. Normal two-way sync
-      # ------------------------------------------------------------
+      #
+      # Chỉ chạy khi:
+      # - Có bisync state
+      # - Không yêu cầu resync thủ công
+      # ============================================================
       - name: Normal Two-Way Sync
-        if: steps.state.outputs.state_exists == 'true' && inputs.resync != true
+        if: inputs.resync != true && steps.state.outputs.state_exists == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -159,9 +171,9 @@ jobs:
           echo "============================================================"
           echo "RCLONE BISYNC - NORMAL RUN"
           echo "============================================================"
-          echo "Google Drive : gdrive:/"
-          echo "Koofr        : koofr:/GoogleBackup"
-          echo "Max delete   : 100 objects"
+          echo "Path 1 : gdrive:/"
+          echo "Path 2 : koofr:/GoogleBackup"
+          echo "Max delete : 100 objects"
           echo "============================================================"
           echo ""
 
@@ -169,8 +181,8 @@ jobs:
             gdrive:/ \
             koofr:/GoogleBackup \
             --fast-list \
+            --drive-acknowledge-abuse \
             --track-renames \
-            --track-renames-strategy modtime,leaf \
             --max-delete 100 \
             --recover \
             --resilient \
@@ -179,9 +191,37 @@ jobs:
             --log-level INFO
 
 
-      # ------------------------------------------------------------
-      # 7. Save bisync state
-      # ------------------------------------------------------------
+      # ============================================================
+      # 7. Stop safely if state is missing
+      #
+      # Không tự ý resync.
+      # ============================================================
+      - name: Stop - Bisync State Missing
+        if: inputs.resync != true && steps.state.outputs.state_exists != 'true'
+        shell: bash
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "ERROR: BISYNC STATE NOT FOUND"
+          echo "============================================================"
+          echo ""
+          echo "Không tìm thấy bisync state."
+          echo ""
+          echo "Không tự động chạy --resync để tránh thay đổi dữ liệu"
+          echo "ngoài ý muốn."
+          echo ""
+          echo "Nếu đây là lần đầu hoặc cần tạo lại baseline:"
+          echo "GitHub Actions -> Run workflow -> resync = true"
+          echo ""
+          exit 1
+
+
+      # ============================================================
+      # 8. Save bisync state
+      #
+      # Cache key dùng run_id để tránh conflict với cache cũ.
+      # Restore-keys ở bước 3 sẽ lấy state mới nhất.
+      # ============================================================
       - name: Save Bisync State
         if: always() && hashFiles('/home/runner/.cache/rclone/bisync/**') != ''
         uses: actions/cache/save@v4
@@ -190,9 +230,9 @@ jobs:
           key: rclone-bisync-state-${{ github.ref_name }}-${{ github.run_id }}
 
 
-      # ------------------------------------------------------------
-      # 8. Final summary
-      # ------------------------------------------------------------
+      # ============================================================
+      # 9. Summary
+      # ============================================================
       - name: Sync Summary
         if: always()
         shell: bash
@@ -202,5 +242,5 @@ jobs:
           echo "SYNC JOB FINISHED"
           echo "============================================================"
           echo "Google Drive <-> Koofr"
-          echo "Target: koofr:/GoogleBackup"
+          echo "Koofr target: koofr:/GoogleBackup"
           echo "============================================================"
