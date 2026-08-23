@@ -42,7 +42,7 @@ jobs:
 
 
       # ============================================================
-      # 2. Get helper script
+      # 2. Checkout repository
       # ============================================================
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -135,6 +135,7 @@ jobs:
 
           echo ""
           echo "Currently ignored files:"
+
           if [ -s .sync-state/ignored-files.txt ]; then
             cat .sync-state/ignored-files.txt
           else
@@ -151,7 +152,8 @@ jobs:
 
           mkdir -p "$HOME/.cache/rclone"
 
-          python3 scripts/bisync-helper.py build-filter \
+          python3 scripts/bisync-helper.py \
+            build-filter \
             .sync-state/ignored-files.txt \
             "$HOME/.cache/rclone/bisync-filters.txt"
 
@@ -244,19 +246,20 @@ jobs:
 
 
       # ============================================================
-      # 10. Rebuild filters if parser found new ignored files
+      # 10. Rebuild filters if new ignored files were found
       # ============================================================
       - name: Rebuild Filters
         if: |
           steps.parse_errors.outputs.new_ignored != '0'
         run: |
-          python3 scripts/bisync-helper.py build-filter \
+          python3 scripts/bisync-helper.py \
+            build-filter \
             .sync-state/ignored-files.txt \
             "$HOME/.cache/rclone/bisync-filters.txt"
 
 
       # ============================================================
-      # 11. Retry only when EVERY detected error is ignorable
+      # 11. Retry ONLY when every detected error is ignorable
       # ============================================================
       - name: Retry With Ignored Files
         id: retry
@@ -272,11 +275,13 @@ jobs:
           echo "RETRY WITH IGNORED FILES"
           echo "============================================================"
 
+          echo "Ignored files:"
           cat .sync-state/ignored-files.txt
 
           echo ""
 
-          # Previous bisync was critically aborted.
+          # Previous bisync was aborted.
+          # Rebuild baseline using the updated filter.
           rm -rf "$HOME/.cache/rclone/bisync"
 
           RETRY_LOG="$GITHUB_WORKSPACE/bisync-retry.log"
