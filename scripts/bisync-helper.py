@@ -9,14 +9,18 @@ from pathlib import Path
 IGNORABLE_PERMISSION = "insufficientFilePermissions"
 IGNORABLE_BLOCKED = "FileBlocked"
 
+# NOTE: markers use "Error <code>" (not bare "429" / "500") to avoid
+# false positives from rclone's own stats output, e.g.
+#   "Transferred:   429 / 500, 86%"
+# which would otherwise look like a fatal Google API error.
 FATAL_MARKERS = (
     "Bisync critical error",
     "Bisync aborted",
     "Failed to create bisync",
     "invalid_grant",
     "401 Unauthorized",
-    "429",
-    "500 Internal",
+    "Error 429",
+    "Error 500",
     "quotaExceeded",
     "rateLimitExceeded",
     "context deadline exceeded",
