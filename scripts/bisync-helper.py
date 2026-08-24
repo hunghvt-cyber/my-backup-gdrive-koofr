@@ -9,6 +9,12 @@ from pathlib import Path
 IGNORABLE_PERMISSION = "insufficientFilePermissions"
 IGNORABLE_BLOCKED = "FileBlocked"
 
+# Google Drive shortcut trỏ tới một file/thư mục đã bị xóa hoặc
+# chuyển đi -> rclone không thể đọc nguồn. Lỗi này KHÔNG tự khỏi
+# khi retry (nguồn không tồn tại), nên coi là ignorable vĩnh viễn,
+# giống insufficientFilePermissions / FileBlocked.
+IGNORABLE_DANGLING_SHORTCUT = "can't read dangling shortcut"
+
 # NOTE: markers use "Error <code>" (not bare "429" / "500") to avoid
 # false positives from rclone's own stats output, e.g.
 #   "Transferred:   429 / 500, 86%"
@@ -169,6 +175,7 @@ def classify_block(block, path=""):
         permission
         blocked
         emoji_filename
+        dangling_shortcut
         fatal
     """
 
@@ -180,6 +187,9 @@ def classify_block(block, path=""):
 
     if INVALID_STATUS_400 in block and EMOJI_PATTERN.search(path):
         return "emoji_filename"
+
+    if IGNORABLE_DANGLING_SHORTCUT in block:
+        return "dangling_shortcut"
 
     return "fatal"
 
@@ -279,6 +289,11 @@ def parse_log(
         elif classification == "emoji_filename":
             reports.append(
                 f"[emoji_filename/400] {path}"
+            )
+
+        elif classification == "dangling_shortcut":
+            reports.append(
+                f"[dangling_shortcut] {path}"
             )
 
     # ------------------------------------------------------------
@@ -470,6 +485,7 @@ def parse_retry(
             "permission",
             "blocked",
             "emoji_filename",
+            "dangling_shortcut",
         ):
             continue
 
