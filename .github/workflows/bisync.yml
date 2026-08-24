@@ -23,7 +23,10 @@ permissions:
 jobs:
   run-bisync:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # GitHub-hosted runner có giới hạn cứng 360 phút/job (6 giờ),
+    # không thể vượt qua dù đặt cao hơn. Đặt sát mức này để tận
+    # dụng tối đa thời gian cho lần resync đầu tiên (~92GB).
+    timeout-minutes: 350
 
     steps:
 
@@ -176,6 +179,10 @@ jobs:
             "15"
             "--recover"
             "--resilient"
+            "--transfers"
+            "8"
+            "--checkers"
+            "16"
             "--filters-file"
             "$HOME/.cache/rclone/bisync-filters.txt"
             "--stats"
@@ -295,6 +302,8 @@ jobs:
             --max-delete 15 \
             --recover \
             --resilient \
+            --transfers 8 \
+            --checkers 16 \
             --filters-file "$HOME/.cache/rclone/bisync-filters.txt" \
             --stats 30s \
             --stats-one-line \
