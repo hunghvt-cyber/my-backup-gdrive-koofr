@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       resync:
-        description: 'Rebuild bisync baseline. Bật true khi đổi compare mode hoặc khi rclone yêu cầu.'
+        description: 'Rebuild bisync baseline. Chỉ bật lần đầu hoặc khi rclone yêu cầu.'
         required: false
         type: boolean
         default: false
@@ -23,8 +23,9 @@ permissions:
 jobs:
   run-bisync:
     runs-on: ubuntu-latest
-
-    # GitHub-hosted runner có giới hạn cứng 360 phút/job.
+    # GitHub-hosted runner có giới hạn cứng 360 phút/job (6 giờ),
+    # không thể vượt qua dù đặt cao hơn. Đặt sát mức này để tận
+    # dụng tối đa thời gian cho lần resync đầu tiên (~92GB).
     timeout-minutes: 350
 
     steps:
@@ -57,7 +58,6 @@ jobs:
         shell: bash
         env:
           RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG_CONTENT }}
-
         run: |
           set -euo pipefail
 
@@ -74,40 +74,24 @@ jobs:
 
           echo ""
           echo "Testing Google Drive..."
-
-          rclone lsd \
-            gdrive:/ \
-            --max-depth 1
+          rclone lsd gdrive: --max-depth 1
 
           echo ""
           echo "Testing Koofr..."
-
-          rclone lsd \
-            koofr:/GoogleBackup \
-            --max-depth 1
+          rclone lsd koofr:GoogleBackup --max-depth 1
 
 
       # ============================================================
       # 4. Restore bisync state
-      #
-      # IMPORTANT:
-      # v2-checksum intentionally does NOT restore the old bisync
-      # state created with size + modtime comparison.
-      #
-      # After changing compare mode to size,checksum we must build
-      # a fresh baseline.
       # ============================================================
       - name: Restore Bisync State
         uses: actions/cache/restore@v4
-
         with:
           path: ~/.cache/rclone/bisync
-
-          key: rclone-bisync-state-v2-checksum-${{ github.ref_name }}-${{ github.run_id }}
-
+          key: rclone-bisync-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            rclone-bisync-state-v2-checksum-${{ github.ref_name }}-
-            rclone-bisync-state-v2-checksum-
+            rclone-bisync-state-${{ github.ref_name }}-
+            rclone-bisync-state-
 
 
       # ============================================================
@@ -115,12 +99,9 @@ jobs:
       # ============================================================
       - name: Restore Ignored Files
         uses: actions/cache/restore@v4
-
         with:
           path: .sync-state
-
           key: rclone-ignored-files-${{ github.ref_name }}-${{ github.run_id }}
-
           restore-keys: |
             rclone-ignored-files-${{ github.ref_name }}-
             rclone-ignored-files-
@@ -132,51 +113,36 @@ jobs:
       - name: Prepare State
         id: state
         shell: bash
-
         run: |
           set -euo pipefail
 
           mkdir -p .sync-state
-
           touch .sync-state/ignored-files.txt
 
-          sort -u \
-            .sync-state/ignored-files.txt \
-            -o \
-            .sync-state/ignored-files.txt
-
+          sort -u .sync-state/ignored-files.txt \
+            -o .sync-state/ignored-files.txt
 
           if [ -d "$HOME/.cache/rclone/bisync" ] && \
              find "$HOME/.cache/rclone/bisync" \
-             -type f \
-             -print \
-             -quit \
-             | grep -q .; then
+             -type f -print -quit | grep -q .; then
 
             echo "state_exists=true" >> "$GITHUB_OUTPUT"
-
-            echo "[INFO] Existing v2 checksum bisync state found."
+            echo "[INFO] Existing bisync state found."
 
           else
 
             echo "state_exists=false" >> "$GITHUB_OUTPUT"
-
-            echo "[INFO] No v2 checksum bisync state found."
+            echo "[INFO] No bisync state found."
 
           fi
-
 
           echo ""
           echo "Currently ignored files:"
 
           if [ -s .sync-state/ignored-files.txt ]; then
-
             cat .sync-state/ignored-files.txt
-
           else
-
             echo "(none)"
-
           fi
 
 
@@ -184,8 +150,6 @@ jobs:
       # 7. Build rclone filter file
       # ============================================================
       - name: Build Filters
-        shell: bash
-
         run: |
           set -euo pipefail
 
@@ -203,65 +167,35 @@ jobs:
       - name: Run Bisync
         id: bisync
         shell: bash
-
         run: |
           set +e
 
           LOG_FILE="$GITHUB_WORKSPACE/bisync.log"
 
-
-          # ========================================================
-          # COMMON RCLONE ARGUMENTS
-          #
-          # IMPORTANT:
-          #
-          # Compare using:
-          #   size + checksum
-          #
-          # instead of:
-          #   size + modtime
-          #
-          # This avoids false conflicts caused by Koofr not
-          # preserving Google Drive modification timestamps.
-          # ========================================================
+          BACKUP_DIR2="koofr:/GoogleBackup-Trash/$(date -u +%Y-%m-%d_%H%M%S)"
 
           COMMON_ARGS=(
             "--fast-list"
-
             "--drive-acknowledge-abuse"
-
             "--max-delete"
-            "15"
-
+            "25"
+            "--backup-dir2"
+            "$BACKUP_DIR2"
             "--recover"
-
             "--resilient"
-
-            "--compare"
-            "size,checksum"
-
+            "--checksum"
             "--transfers"
             "8"
-
             "--checkers"
             "16"
-
             "--filters-file"
             "$HOME/.cache/rclone/bisync-filters.txt"
-
             "--stats"
             "30s"
-
             "--stats-one-line"
-
             "--log-level"
             "INFO"
           )
-
-
-          # ========================================================
-          # MANUAL RESYNC
-          # ========================================================
 
           if [ "${{ inputs.resync }}" = "true" ]; then
 
@@ -274,11 +208,6 @@ jobs:
               "${COMMON_ARGS[@]}" \
               2>&1 | tee "$LOG_FILE"
 
-
-          # ========================================================
-          # NORMAL BISYNC
-          # ========================================================
-
           elif [ "${{ steps.state.outputs.state_exists }}" = "true" ]; then
 
             echo "[MODE] NORMAL BISYNC"
@@ -289,11 +218,6 @@ jobs:
               --track-renames \
               "${COMMON_ARGS[@]}" \
               2>&1 | tee "$LOG_FILE"
-
-
-          # ========================================================
-          # INITIAL RESYNC
-          # ========================================================
 
           else
 
@@ -308,22 +232,13 @@ jobs:
 
           fi
 
-
           RC=${PIPESTATUS[0]}
 
-
-          echo "rclone_exit_code=$RC" \
-            >> "$GITHUB_OUTPUT"
-
+          echo "rclone_exit_code=$RC" >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "Rclone exit code: $RC"
 
-
-          # IMPORTANT:
-          # Do not fail this step here.
-          # The parser + Final Status decide whether the error
-          # is safely retryable.
           exit 0
 
 
@@ -332,11 +247,7 @@ jobs:
       # ============================================================
       - name: Parse Bisync Errors
         id: parse_errors
-
         if: always()
-
-        shell: bash
-
         run: |
           python3 scripts/bisync-helper.py \
             parse \
@@ -350,12 +261,8 @@ jobs:
       # 10. Rebuild filters if new ignored files were found
       # ============================================================
       - name: Rebuild Filters
-
         if: |
           steps.parse_errors.outputs.new_ignored != '0'
-
-        shell: bash
-
         run: |
           python3 scripts/bisync-helper.py \
             build-filter \
@@ -364,34 +271,15 @@ jobs:
 
 
       # ============================================================
-      # 11. Retry ONLY when:
-      #
-      #   rclone failed
-      #   AND
-      #   new ignorable files were found
-      #   AND
-      #   there are NO unignorable errors
-      #
-      # This prevents automatic resync after:
-      #
-      #   Bisync critical error
-      #   Bisync aborted
-      #   401
-      #   429
-      #   500
-      #   invalid_grant
-      #   etc.
+      # 11. Retry ONLY when every detected error is ignorable
       # ============================================================
       - name: Retry With Ignored Files
         id: retry
-
         if: |
           steps.bisync.outputs.rclone_exit_code != '0'
           && steps.parse_errors.outputs.new_ignored != '0'
           && steps.parse_errors.outputs.has_unignorable_errors == 'false'
-
         shell: bash
-
         run: |
           set +e
 
@@ -404,68 +292,36 @@ jobs:
 
           echo ""
 
-
           # Previous bisync was aborted.
-          #
           # Rebuild baseline using the updated filter.
-
           rm -rf "$HOME/.cache/rclone/bisync"
-
 
           RETRY_LOG="$GITHUB_WORKSPACE/bisync-retry.log"
 
-
-          # Use exactly the same comparison settings as the
-          # main bisync.
-
-          COMMON_ARGS=(
-            "--fast-list"
-
-            "--drive-acknowledge-abuse"
-
-            "--max-delete"
-            "15"
-
-            "--recover"
-
-            "--resilient"
-
-            "--compare"
-            "size,checksum"
-
-            "--transfers"
-            "8"
-
-            "--checkers"
-            "16"
-
-            "--filters-file"
-            "$HOME/.cache/rclone/bisync-filters.txt"
-
-            "--stats"
-            "30s"
-
-            "--stats-one-line"
-
-            "--log-level"
-            "INFO"
-          )
-
+          RETRY_BACKUP_DIR2="koofr:/GoogleBackup-Trash/$(date -u +%Y-%m-%d_%H%M%S)-retry"
 
           rclone bisync \
             gdrive:/ \
             koofr:/GoogleBackup \
             --resync \
-            "${COMMON_ARGS[@]}" \
+            --fast-list \
+            --drive-acknowledge-abuse \
+            --max-delete 25 \
+            --backup-dir2 "$RETRY_BACKUP_DIR2" \
+            --recover \
+            --resilient \
+            --checksum \
+            --transfers 8 \
+            --checkers 16 \
+            --filters-file "$HOME/.cache/rclone/bisync-filters.txt" \
+            --stats 30s \
+            --stats-one-line \
+            --log-level INFO \
             2>&1 | tee "$RETRY_LOG"
-
 
           RC=${PIPESTATUS[0]}
 
-
-          echo "retry_exit_code=$RC" \
-            >> "$GITHUB_OUTPUT"
-
+          echo "retry_exit_code=$RC" >> "$GITHUB_OUTPUT"
 
           exit 0
 
@@ -475,13 +331,9 @@ jobs:
       # ============================================================
       - name: Parse Retry Errors
         id: parse_retry
-
         if: |
           steps.retry.outputs.retry_exit_code != ''
           && steps.retry.outputs.retry_exit_code != '0'
-
-        shell: bash
-
         run: |
           python3 scripts/bisync-helper.py \
             parse-retry \
@@ -494,31 +346,21 @@ jobs:
       # 13. Save bisync state
       # ============================================================
       - name: Save Bisync State
-
-        if: |
-          always()
-          && hashFiles('/home/runner/.cache/rclone/bisync/**') != ''
-
+        if: always() && hashFiles('/home/runner/.cache/rclone/bisync/**') != ''
         uses: actions/cache/save@v4
-
         with:
           path: ~/.cache/rclone/bisync
-
-          key: rclone-bisync-state-v2-checksum-${{ github.ref_name }}-${{ github.run_id }}
+          key: rclone-bisync-state-${{ github.ref_name }}-${{ github.run_id }}
 
 
       # ============================================================
       # 14. Save ignored files
       # ============================================================
       - name: Save Ignored Files
-
         if: always()
-
         uses: actions/cache/save@v4
-
         with:
           path: .sync-state
-
           key: rclone-ignored-files-${{ github.ref_name }}-${{ github.run_id }}
 
 
@@ -526,22 +368,16 @@ jobs:
       # 15. Upload report
       # ============================================================
       - name: Upload Bisync Report
-
         if: always()
-
         uses: actions/upload-artifact@v4
-
         with:
           name: bisync-report-${{ github.run_id }}
-
           path: |
             .sync-state/ignored-files.txt
             .sync-state/ignored-report.txt
             bisync.log
             bisync-retry.log
-
           if-no-files-found: ignore
-
           retention-days: 30
 
 
@@ -549,63 +385,41 @@ jobs:
       # 16. GitHub Actions Summary
       # ============================================================
       - name: Generate Summary
-
         if: always()
-
         shell: bash
-
         run: |
           {
             echo "## Google Drive ↔ Koofr"
             echo ""
-
             echo "**Target:** \`koofr:/GoogleBackup\`"
             echo ""
-
-            echo "### Comparison"
-            echo ""
-
-            echo "- Compare: **size + checksum**"
-            echo "- Modtime is NOT used for file equality"
-            echo ""
-
             echo "### Ignored files"
 
             if [ -s .sync-state/ignored-files.txt ]; then
-
               COUNT=$(wc -l < .sync-state/ignored-files.txt)
 
               echo ""
               echo "**$COUNT file(s)** currently ignored."
               echo ""
-
               echo '```text'
-
               cat .sync-state/ignored-files.txt
-
               echo '```'
-
             else
-
               echo ""
               echo "No ignored files."
-
             fi
 
             echo ""
             echo "### Safety"
             echo ""
-
             echo "- Two-way bisync"
-            echo "- --max-delete 15%"
+            echo "- --max-delete 25%"
+            echo "- --backup-dir2 (file bị xóa ở Koofr được chuyển vào koofr:/GoogleBackup-Trash/, không xóa vĩnh viễn)"
             echo "- --recover"
             echo "- --resilient"
-            echo "- --compare size,checksum"
+            echo "- --checksum (so sánh nội dung, không dùng modtime vì Koofr ghi sai)"
             echo "- Permission/FileBlocked errors are tracked"
-            echo "- Dangling shortcuts are tracked"
-            echo "- Emoji/Unicode 400 errors are tracked"
             echo "- Other errors remain fatal"
-
           } >> "$GITHUB_STEP_SUMMARY"
 
 
@@ -613,79 +427,40 @@ jobs:
       # 17. Final status
       # ============================================================
       - name: Final Status
-
         shell: bash
-
         run: |
           set -euo pipefail
 
-
           RC="${{ steps.bisync.outputs.rclone_exit_code }}"
-
           RETRY_RC="${{ steps.retry.outputs.retry_exit_code }}"
 
-
-          RETRY_NEW=$(
-            cat .sync-state/retry-new-count \
-            2>/dev/null \
-            || echo 0
-          )
-
+          RETRY_NEW=$(cat .sync-state/retry-new-count 2>/dev/null || echo 0)
 
           echo "============================================================"
           echo "FINAL STATUS"
           echo "============================================================"
 
           echo "Initial rclone exit code: ${RC:-unknown}"
-
           echo "Retry rclone exit code:   ${RETRY_RC:-not-run}"
-
           echo "New errors during retry:  $RETRY_NEW"
-
           echo ""
 
-
-          # ========================================================
-          # INITIAL BISYNC SUCCESS
-          # ========================================================
-
           if [ "${RC:-1}" = "0" ]; then
-
             echo "BISYNC SUCCESS"
-
             exit 0
-
           fi
-
-
-          # ========================================================
-          # RETRY SUCCESS
-          # ========================================================
 
           if [ "${RETRY_RC:-1}" = "0" ]; then
 
             if [ "$RETRY_NEW" != "0" ]; then
-
               echo "::warning::Retry succeeded but detected $RETRY_NEW new ignored file(s). Check the artifact."
-
             fi
 
-
             echo "BISYNC SUCCESS AFTER IGNORING PROBLEMATIC FILES"
-
             exit 0
-
           fi
 
-
-          # ========================================================
-          # FAILURE
-          # ========================================================
-
           echo "BISYNC FAILED"
-
           echo ""
-
           echo "No unsafe automatic resync was performed."
-
           exit 1
