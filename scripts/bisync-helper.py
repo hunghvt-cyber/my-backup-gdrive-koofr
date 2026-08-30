@@ -37,24 +37,12 @@ ERROR_START = re.compile(
     r"ERROR\s*:\s*(.*?)\s*:\s*Failed to copy:"
 )
 
-# Koofr trả về "Invalid response status! Got 400" cho một số tên file
-# chứa emoji / ký tự Unicode ngoài BMP (mặt cười, biểu tượng, cờ, v.v).
-# Đây là giới hạn phía Koofr, không phải lỗi tạm thời -> coi là
-# ignorable NẾU path chứa emoji VÀ lỗi đúng dạng "Got 400".
-EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F300-\U0001F5FF"  # symbols & pictographs
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F680-\U0001F6FF"  # transport & map
-    "\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
-    "\U0001FA70-\U0001FAFF"  # symbols & pictographs extended-A
-    "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
-    "\U00002600-\U000026FF"  # misc symbols
-    "\U00002700-\U000027BF"  # dingbats
-    "]",
-    flags=re.UNICODE,
-)
-
+# Koofr trả về "Invalid response status! Got 400" khi Failed to copy
+# một số tên file. Ban đầu nghĩ chỉ do emoji, nhưng thực tế đã thấy
+# xảy ra cả với ký hiệu toán học, chữ tượng hình, dấu phụ Hebrew,
+# ký hiệu âm nhạc... -> phạm vi rộng hơn emoji rất nhiều, không thể
+# liệt kê hết bằng regex. Vì vậy coi MỌI lỗi "Got 400" ở cấp từng
+# file là ignorable, không cần kiểm tra ký tự trong tên file nữa.
 INVALID_STATUS_400 = "Invalid response status! Got 400"
 
 
@@ -174,7 +162,7 @@ def classify_block(block, path=""):
     Return:
         permission
         blocked
-        emoji_filename
+        koofr_400_filename
         dangling_shortcut
         fatal
     """
@@ -185,8 +173,8 @@ def classify_block(block, path=""):
     if IGNORABLE_BLOCKED in block:
         return "blocked"
 
-    if INVALID_STATUS_400 in block and EMOJI_PATTERN.search(path):
-        return "emoji_filename"
+    if INVALID_STATUS_400 in block:
+        return "koofr_400_filename"
 
     if IGNORABLE_DANGLING_SHORTCUT in block:
         return "dangling_shortcut"
@@ -286,9 +274,9 @@ def parse_log(
                 f"[FileBlocked] {path}"
             )
 
-        elif classification == "emoji_filename":
+        elif classification == "koofr_400_filename":
             reports.append(
-                f"[emoji_filename/400] {path}"
+                f"[koofr_400_filename] {path}"
             )
 
         elif classification == "dangling_shortcut":
@@ -484,7 +472,7 @@ def parse_retry(
         if classification not in (
             "permission",
             "blocked",
-            "emoji_filename",
+            "koofr_400_filename",
             "dangling_shortcut",
         ):
             continue
