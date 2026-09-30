@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      reset:
+        description: 'Xóa bisync state + ignore list cũ và chạy lại sạch như lần đầu.'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: gdrive-koofr-bisync
@@ -85,6 +90,7 @@ jobs:
       # 4. Restore bisync state
       # ============================================================
       - name: Restore Bisync State
+        if: ${{ inputs.reset != true }}
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/rclone/bisync
@@ -98,6 +104,7 @@ jobs:
       # 5. Restore ignored files
       # ============================================================
       - name: Restore Ignored Files
+        if: ${{ inputs.reset != true }}
         uses: actions/cache/restore@v4
         with:
           path: .sync-state
@@ -115,6 +122,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [ "${{ inputs.reset }}" = "true" ]; then
+            echo "[MODE] CLEAN RESET"
+            rm -rf "$HOME/.cache/rclone/bisync" .sync-state
+          fi
 
           mkdir -p .sync-state
           touch .sync-state/ignored-files.txt
