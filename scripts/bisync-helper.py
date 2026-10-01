@@ -19,9 +19,12 @@ IGNORABLE_DANGLING_SHORTCUT = "can't read dangling shortcut"
 # false positives from rclone's own stats output, e.g.
 #   "Transferred:   429 / 500, 86%"
 # which would otherwise look like a fatal Google API error.
+#
+# Do NOT include generic "Bisync critical error" / "Bisync aborted"
+# here. rclone emits those wrappers when an otherwise-ignorable
+# per-file error causes bisync to abort. The per-file block is the
+# authoritative classification.
 FATAL_MARKERS = (
-    "Bisync critical error",
-    "Bisync aborted",
     "Failed to create bisync",
     "invalid_grant",
     "401 Unauthorized",
@@ -604,6 +607,7 @@ def main():
             Path(sys.argv[2]),
             Path(sys.argv[3]),
             Path(sys.argv[4]),
+            Path(sys.argv[5]),
         )
 
     else:
