@@ -607,7 +607,6 @@ def main():
             Path(sys.argv[2]),
             Path(sys.argv[3]),
             Path(sys.argv[4]),
-            Path(sys.argv[5]),
         )
 
     else:
